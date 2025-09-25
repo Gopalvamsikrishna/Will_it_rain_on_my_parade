@@ -1,0 +1,244 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Will It Rain — Demo UI</title>
+  <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; max-width:1100px; margin:18px auto; padding:0 18px; }
+    label { display:inline-block; width:120px; font-weight:600; }
+    .row { margin:6px 0; }
+    .controls { background:#f7f7f7; padding:12px; border-radius:6px; margin-bottom:12px;}
+    #outputJson { white-space:pre-wrap; background:#111; color:#dff; padding:10px; border-radius:6px; max-height:240px; overflow:auto; }
+    #charts { display:flex; gap:16px; flex-wrap:wrap; margin-top:12px; }
+    .chart { flex:1 1 48%; min-width:320px; height:360px; }
+    button { padding:8px 12px; margin-left:6px; }
+  </style>
+</head>
+<body>
+  <h1>Will It Rain — Demo UI</h1>
+
+  <div class="controls">
+    <div class="row">
+      <label>Variable</label>
+      <select id="varSelect">
+        <option value="t2m_max">t2m_max (max temp °C)</option>
+        <option value="t2m_min">t2m_min (min temp °C)</option>
+        <option value="t2m">t2m (mean temp °C)</option>
+        <option value="prectot">prectot (precip mm/day)</option>
+        <option value="ws10m">ws10m (wind m/s)</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>Mode</label>
+      <input type="radio" name="mode" id="modeDay" value="day" checked> <label for="modeDay" style="width:auto">Single day</label>
+      <input type="radio" name="mode" id="modeRange" value="range"> <label for="modeRange" style="width:auto">Day range</label>
+    </div>
+
+    <div class="row" id="dayRow">
+      <label>Day of year</label>
+      <input id="doy" type="number" min="1" max="366" value="196" style="width:120px">
+    </div>
+
+    <div class="row" id="rangeRow" style="display:none">
+      <label>Range (doy)</label>
+      <input id="doyStart" type="number" min="1" max="366" value="152" style="width:80px"> -
+      <input id="doyEnd" type="number" min="1" max="366" value="244" style="width:80px">
+      <label style="width:120px;margin-left:8px">Agg</label>
+      <select id="agg">
+        <option value="sum">sum</option>
+        <option value="mean">mean</option>
+        <option value="max">max</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>Threshold</label>
+      <input id="threshold" type="number" step="0.1" value="30" style="width:120px">
+      <button id="runBtn">Get Probability & Trend</button>
+      <button id="exampleBtn">Example: lower threshold</button>
+    </div>
+
+    <div style="margin-top:8px;">
+      <small>Server URL: <code id="serverUrl">http://127.0.0.1:8000</code></small>
+    </div>
+  </div>
+
+  <div style="display:flex; gap:12px;">
+    <div style="flex:1">
+      <h3>API Response</h3>
+      <div id="outputJson">(results will appear here)</div>
+    </div>
+    <div style="width:320px">
+      <h3>Quick summary</h3>
+      <div id="summary">No query yet.</div>
+    </div>
+  </div>
+
+  <div id="charts">
+    <div id="annualChart" class="chart"></div>
+    <div id="decadalChart" class="chart"></div>
+  </div>
+
+<script>
+/* ---------------------
+   Helper plotting funcs
+   --------------------- */
+
+function drawAnnualScatterAndFit(targetId, years, values) {
+  // Filter valid numeric points
+  const pts = years.map((y,i) => ({x: y, y: values[i]}))
+                   .filter(p => p.y !== null && p.y !== undefined && !isNaN(p.y));
+  const xs = pts.map(p => p.x);
+  const ys = pts.map(p => p.y);
+
+  const scatter = { x: xs, y: ys, mode: 'markers', name: 'Annual values', marker: { size:6 } };
+
+  if (xs.length >= 2) {
+    // simple least-squares slope/intercept
+    const n = xs.length;
+    let sumX=0,sumY=0,sumXY=0,sumXX=0;
+    for(let i=0;i<n;i++){
+      sumX += xs[i]; sumY += ys[i];
+      sumXY += xs[i]*ys[i]; sumXX += xs[i]*xs[i];
+    }
+    const meanX = sumX/n, meanY = sumY/n;
+    const slope = (sumXY - n*meanX*meanY) / (sumXX - n*meanX*meanX);
+    const intercept = meanY - slope*meanX;
+    const fitX = [Math.min(...xs), Math.max(...xs)];
+    const fitY = fitX.map(x => slope*x + intercept);
+    const fit = { x: fitX, y: fitY, mode: 'lines', name: `Linear fit (slope=${(slope||0).toFixed(4)})` };
+    Plotly.newPlot(targetId, [scatter, fit], { title: 'Annual values + linear fit', margin:{t:36} });
+  } else {
+    Plotly.newPlot(targetId, [scatter], { title: 'Annual values', margin:{t:36} });
+  }
+}
+
+function plotDecadalFromTrendResp(trendResp, varName, threshold) {
+  const dec = (trendResp && trendResp.decadal_summary) ? trendResp.decadal_summary : [];
+  if (!dec.length) {
+    Plotly.newPlot('decadalChart', [], { title: 'Decadal summary (no data)', margin:{t:36} });
+    return;
+  }
+  const decades = dec.map(d => `${d.decade_start}-${d.decade_end}`);
+  // detect which key exists
+  const isProb = dec[0].hasOwnProperty('prob_exceed');
+  const vals = dec.map(d => isProb ? d.prob_exceed : d.mean_value);
+  const trace = { x: decades, y: vals, type: 'bar', name: isProb ? 'Probability' : 'Mean value', hovertemplate: '%{x}<br>%{y}<extra></extra>' };
+  const title = isProb ? `Decadal probability of exceeding threshold (${threshold})` : `Decadal mean ${varName}`;
+  Plotly.newPlot('decadalChart', [trace], { title, margin:{t:36} });
+}
+
+/* ---------------------
+   Utility + UI helpers
+   --------------------- */
+
+function setStatus(text) {
+  document.getElementById('summary').innerText = text;
+}
+function safeJsonText(obj) {
+  try { return JSON.stringify(obj, null, 2); } catch(e) { return String(obj); }
+}
+
+/* ---------------------
+   Main runQuery()
+   --------------------- */
+
+const server = document.getElementById('serverUrl').innerText.replace(/\/+$/,'');
+const runBtn = document.getElementById('runBtn');
+const exampleBtn = document.getElementById('exampleBtn');
+
+document.getElementById('modeDay').addEventListener('change', toggleMode);
+document.getElementById('modeRange').addEventListener('change', toggleMode);
+function toggleMode(){
+  const isRange = document.getElementById('modeRange').checked;
+  document.getElementById('dayRow').style.display = isRange ? 'none' : 'block';
+  document.getElementById('rangeRow').style.display = isRange ? 'block' : 'none';
+}
+
+exampleBtn.onclick = () => {
+  document.getElementById('threshold').value = 30;
+  runQuery();
+};
+runBtn.onclick = runQuery;
+
+async function runQuery(){
+  const v = document.getElementById('varSelect').value;
+  const isRange = document.getElementById('modeRange').checked;
+  const threshold = parseFloat(document.getElementById('threshold').value);
+  const agg = document.getElementById('agg').value;
+
+  let probUrl="", trendUrl="", histUrl="";
+  if (isRange) {
+    const ds = parseInt(document.getElementById('doyStart').value);
+    const de = parseInt(document.getElementById('doyEnd').value);
+    probUrl  = `${server}/probability?var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}&threshold=${encodeURIComponent(threshold)}&n_boot=500`;
+    trendUrl = `${server}/trend?var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}&threshold=${encodeURIComponent(threshold)}&decade_span=10`;
+    histUrl  = `${server}/history?var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}`;
+  } else {
+    const doy = parseInt(document.getElementById('doy').value);
+    probUrl  = `${server}/probability?var=${encodeURIComponent(v)}&doy=${doy}&threshold=${encodeURIComponent(threshold)}&n_boot=500`;
+    trendUrl = `${server}/trend?var=${encodeURIComponent(v)}&doy=${doy}&threshold=${encodeURIComponent(threshold)}&decade_span=10`;
+    histUrl  = `${server}/history?var=${encodeURIComponent(v)}&doy=${doy}`;
+  }
+
+  // Debug: show URLs
+  console.log("probUrl =", probUrl);
+  console.log("trendUrl =", trendUrl);
+  console.log("histUrl =", histUrl);
+
+  setStatus("(fetching...)");
+  try {
+    const [probRespRaw, trendRespRaw, histRespRaw] = await Promise.all([
+      fetch(probUrl).then(async r => ({ ok: r.ok, status: r.status, json: await safeJson(r) })),
+      fetch(trendUrl).then(async r => ({ ok: r.ok, status: r.status, json: await safeJson(r) })),
+      fetch(histUrl).then(async r => ({ ok: r.ok, status: r.status, json: await safeJson(r) }))
+    ]);
+
+    // If any request failed (non-2xx), show error details
+    for (const res of [probRespRaw, trendRespRaw, histRespRaw]) {
+      if (!res.ok) {
+        throw new Error(`Request failed (status ${res.status}): ${JSON.stringify(res.json)}`);
+      }
+    }
+
+    const probResp = probRespRaw.json;
+    const trendResp = trendRespRaw.json;
+    const histResp = histRespRaw.json;
+
+    document.getElementById('outputJson').innerText = safeJsonText({ probability: probResp, trend: trendResp, history: histResp });
+    renderSummary(probResp, trendResp);
+    // plot history & decadal
+    drawAnnualScatterAndFit('annualChart', histResp.years || [], histResp.values || []);
+    plotDecadalFromTrendResp(trendResp, v, threshold);
+  } catch (err) {
+    console.error("API fetch error:", err);
+    setStatus("Error contacting API: " + (err.message || err));
+  }
+}
+
+/* safeJson helper: try to parse body text as JSON, otherwise return raw text */
+async function safeJson(resp) {
+  try { return await resp.json(); } catch (e) { return await resp.text(); }
+}
+
+function renderSummary(prob, trend){
+  if(!prob || !prob.ok) {
+    setStatus("Probability not available: " + safeJsonText(prob));
+    return;
+  }
+  const p = Math.round((prob.probability||0)*1000)/10;
+  const years = prob.years_used;
+  const exceed = prob.exceed_count;
+  let s = `Probability of exceeding threshold: ${p}% (based on ${years} years, exceed_count=${exceed})\n`;
+  if(trend && trend.value_trend){
+    const slope = trend.value_trend.slope_per_year;
+    const slope_dec = (slope*10).toFixed(3);
+    s += `Value trend: ${slope?.toFixed(4) ?? 'n/a'} units/year (~${slope_dec} per decade). p=${trend.value_trend.p_value ?? 'null'}\n`;
+  }
+  setStatus(s);
+}
+</script>
+</body>
+</html>

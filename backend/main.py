@@ -1,22 +1,58 @@
 # backend/main.py
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
 from typing import Optional
+import math
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
+from scipy.stats import linregress
+from functools import lru_cache
 
-app = FastAPI(title="Will-It-Rain: Probability API")
+# Allow the frontend origin(s) used during development:
+origins = [
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    # add any other local dev URLs you might use
+]
 
+app = FastAPI(title="Will-It-Rain API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,      # for dev: you may use ["*"], but prefer specific origins
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+
+# Path to cleaned CSV (adjust if you used a different path)
 CLEAN_CSV = "data_pipeline/cache/sample_point_daily_clean.csv"
 
-def load_clean_csv(path=CLEAN_CSV):
+# -------------------------
+# Utility: load CSV once (cached)
+# -------------------------
+@lru_cache(maxsize=1)
+def load_clean_csv(path: str = CLEAN_CSV) -> pd.DataFrame:
     try:
-        return pd.read_csv(path, comment="#", parse_dates=["date"])
+        df = pd.read_csv(path, comment="#", parse_dates=["date"])
+        # ensure expected derived columns exist (if not, compute)
+        if "day_of_year" not in df.columns:
+            df["day_of_year"] = pd.to_datetime(df["date"]).dt.dayofyear
+            df["year"] = pd.to_datetime(df["date"]).dt.year
+        return df
     except Exception as e:
-        raise RuntimeError(f"Cannot load cleaned CSV: {e}")
+        raise RuntimeError(f"Cannot load cleaned CSV '{path}': {e}")
 
-def extract_yearly_values(df, var, doy=None, doy_start=None, doy_end=None, agg="mean"):
+# -------------------------
+# Extraction helpers
+# -------------------------
+def extract_yearly_values(df: pd.DataFrame, var: str,
+                          doy: Optional[int]=None,
+                          doy_start: Optional[int]=None,
+                          doy_end: Optional[int]=None,
+                          agg: str="mean"):
     if doy is not None:
         sel = df[df["day_of_year"] == int(doy)]
         yearly = sel.groupby("year")[var].first().dropna()
@@ -32,6 +68,9 @@ def extract_yearly_values(df, var, doy=None, doy_start=None, doy_end=None, agg="
             raise ValueError("Unsupported agg")
     return yearly.sort_index()
 
+# -------------------------
+# Probability helpers (same as you used)
+# -------------------------
 def empirical_probability(values, threshold):
     n = len(values)
     if n == 0:
@@ -53,22 +92,100 @@ def bootstrap_ci(values, threshold, n_boot=1000, ci=95, random_state=0):
     upper = float(np.percentile(probs, 100 - (100 - ci) / 2))
     return lower, upper, float(np.mean(probs)), float(np.std(probs))
 
-class ProbabilityResponse(BaseModel):
-    ok: bool
-    variable: str
-    mode: str
-    doy: Optional[int]
-    doy_start: Optional[int]
-    doy_end: Optional[int]
-    aggregation_over_range: Optional[str]
-    threshold: float
-    years_used: int
-    exceed_count: int
-    probability: float
-    bootstrap: dict
-    computed_on: str
+# -------------------------
+# Trend helpers
+# -------------------------
+def compute_linear_trend(years, values):
+    if len(years) < 3:
+        return None
+    res = linregress(years, values)
+    return {
+        "slope_per_year": float(res.slope),
+        "intercept": float(res.intercept),
+        "r_value": float(res.rvalue),
+        "p_value": float(res.pvalue),
+        "stderr": float(res.stderr)
+    }
 
-@app.get("/probability", response_model=ProbabilityResponse)
+def compute_exceedance_trend(years, values, threshold):
+    bin_vals = (np.array(values) > threshold).astype(float)
+    return compute_linear_trend(years, bin_vals), int(bin_vals.sum()), int(len(bin_vals))
+
+def decadal_summary(years, values, threshold=None, decade_span=10):
+    df = pd.DataFrame({"year": list(years), "value": list(values)})
+    df = df.sort_values("year")
+    df["decade_start"] = (df["year"] // decade_span) * decade_span
+    out = []
+    for start, g in df.groupby("decade_start"):
+        k = "mean_value" if threshold is None else "prob_exceed"
+        years_used = int(g["year"].nunique())
+        if threshold is None:
+            val = float(g["value"].mean())
+        else:
+            val = float((g["value"] > threshold).sum() / years_used) if years_used>0 else None
+        out.append({
+            "decade_start": int(start),
+            "decade_end": int(start + decade_span - 1),
+            "years_used": years_used,
+            k: val
+        })
+    return out
+
+def _sanitize_value(v):
+    # Convert numpy scalar types, floats with nan/inf, and nested structures to JSON-safe Python values
+    if v is None:
+        return None
+    # numpy scalar
+    if isinstance(v, (np.floating, np.integer)):
+        try:
+            py = v.item()
+        except Exception:
+            py = float(v)
+        if isinstance(py, float):
+            if math.isnan(py) or math.isinf(py):
+                return None
+        return py
+    # builtin float/int
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+    if isinstance(v, (int, str, bool)):
+        return v
+    # list / tuple / ndarray
+    if isinstance(v, (list, tuple, np.ndarray)):
+        return [_sanitize_value(x) for x in v]
+    # dict -> sanitize recursively
+    if isinstance(v, dict):
+        return {str(k): _sanitize_value(val) for k, val in v.items()}
+    # pandas types that might sneak in
+    try:
+        # detect pandas Timestamp / numpy datetime, convert to ISO string
+        import pandas as pd
+        if isinstance(v, (pd.Timestamp, pd.DatetimeTZDtype)):
+            return str(v)
+    except Exception:
+        pass
+    # fallback: try turning into native python type
+    try:
+        return v if isinstance(v, (str, bool)) else (float(v) if isinstance(v, (np.number,)) else v)
+    except Exception:
+        # last resort
+        return None
+
+def sanitize_for_json(obj):
+    """
+    Recursively sanitize a nested structure (dict/list) replacing nan/inf and numpy scalars
+    with JSON-serializable equivalents (None or Python primitives).
+    """
+    return _sanitize_value(obj)
+
+
+
+# -------------------------
+# /probability endpoint (same behaviour)
+# -------------------------
+@app.get("/probability")
 def probability_api(
     var: str = Query(..., description="variable name, e.g., t2m_max"),
     threshold: float = Query(...),
@@ -81,18 +198,18 @@ def probability_api(
 ):
     df = load_clean_csv()
     if var not in df.columns:
-        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found")
+        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found in cleaned CSV.")
 
     if doy is None and (doy_start is None or doy_end is None):
-        raise HTTPException(status_code=400, detail="Either 'doy' or both 'doy_start' and 'doy_end' required")
+        raise HTTPException(status_code=400, detail="Either 'doy' or both 'doy_start' and 'doy_end' required.")
 
     yearly = extract_yearly_values(df, var=var, doy=doy, doy_start=doy_start, doy_end=doy_end, agg=agg)
 
     if len(yearly) < min_years:
         raise HTTPException(status_code=400, detail={"reason":"insufficient_years","years_available":len(yearly),"min_years_required":min_years})
 
-    prob_tuple = empirical_probability(yearly.values, threshold)
-    p, exceed, n = prob_tuple
+    p_tuple = empirical_probability(yearly.values, threshold)
+    p, exceed, n = p_tuple
     ci = bootstrap_ci(yearly.values, threshold, n_boot=n_boot) if n_boot>0 else (None,None,None,None)
 
     resp = {
@@ -109,12 +226,109 @@ def probability_api(
         "probability": p,
         "bootstrap": {
             "n_boot": n_boot,
-            "ci_95_lower": ci[0],
-            "ci_95_upper": ci[1],
-            "bootstrap_mean": ci[2],
-            "bootstrap_std": ci[3]
+            "ci_95_lower": ci[0] if ci is not None else None,
+            "ci_95_upper": ci[1] if ci is not None else None,
+            "bootstrap_mean": ci[2] if ci is not None else None,
+            "bootstrap_std": ci[3] if ci is not None else None
         },
         "computed_on": datetime.now(timezone.utc).isoformat()
     }
-    return resp
+    return sanitize_for_json(resp)
 
+# -------------------------
+# /trend endpoint
+# -------------------------
+@app.get("/trend")
+def trend_api(
+    var: str = Query(..., description="variable name, e.g., t2m_max"),
+    doy: Optional[int] = Query(None, ge=1, le=366),
+    doy_start: Optional[int] = Query(None, ge=1, le=366),
+    doy_end: Optional[int] = Query(None, ge=1, le=366),
+    agg: str = Query("mean", regex="^(mean|sum|max)$"),
+    threshold: Optional[float] = Query(None, description="optional threshold to compute exceedance trend"),
+    decade_span: int = Query(10, ge=1),
+    min_years: int = Query(10, ge=1)
+):
+    df = load_clean_csv()
+    if var not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found in cleaned CSV.")
+
+    if doy is None and (doy_start is None or doy_end is None):
+        raise HTTPException(status_code=400, detail="Either 'doy' or both 'doy_start' and 'doy_end' required.")
+
+    yearly = extract_yearly_values(df, var=var, doy=doy, doy_start=doy_start, doy_end=doy_end, agg=agg)
+    years = list(yearly.index.astype(int))
+    values = list(yearly.values.astype(float))
+
+    if len(years) < min_years:
+        raise HTTPException(status_code=400, detail={"reason":"insufficient_years","years_available":len(years),"min_years_required":min_years})
+
+    value_trend = compute_linear_trend(years, values)
+    exceedance_trend = None
+    if threshold is not None:
+        exceedance_trend, exceed_count, n = compute_exceedance_trend(years, values, threshold)
+
+    decadal = decadal_summary(years, values, threshold=threshold, decade_span=decade_span)
+
+    resp = {
+        "ok": True,
+        "variable": var,
+        "mode": "single_day" if doy is not None else "range",
+        "doy": int(doy) if doy is not None else None,
+        "doy_start": int(doy_start) if doy_start is not None else None,
+        "doy_end": int(doy_end) if doy_end is not None else None,
+        "aggregation_over_range": agg,
+        "years_used": len(years),
+        "value_trend": value_trend,
+        "exceedance_trend": exceedance_trend,
+        "decadal_summary": decadal,
+        "computed_on": datetime.now(timezone.utc).isoformat()
+    }
+    return sanitize_for_json(resp)
+
+
+# -------------------------
+# History endpoint
+# -------------------------
+
+@app.get("/history")
+def history_api(
+    var: str = Query(..., description="variable name e.g. t2m_max"),
+    doy: Optional[int] = Query(None, ge=1, le=366),
+    doy_start: Optional[int] = Query(None, ge=1, le=366),
+    doy_end: Optional[int] = Query(None, ge=1, le=366),
+    agg: str = Query("mean", regex="^(mean|sum|max)$")
+):
+    df = load_clean_csv()
+    if var not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Variable '{var}' not in cleaned CSV")
+    if doy is None and (doy_start is None or doy_end is None):
+        raise HTTPException(status_code=400, detail="Either 'doy' OR both 'doy_start' and 'doy_end' required")
+
+    yearly = extract_yearly_values(df, var=var, doy=doy, doy_start=doy_start, doy_end=doy_end, agg=agg)
+    years = [int(y) for y in yearly.index.tolist()]
+    values = []
+    for v in yearly.values:
+        # convert NaN -> null in JSON
+        if isinstance(v, (np.floating,)) and (np.isnan(v) or np.isinf(v)):
+            values.append(None)
+        else:
+            # cast to python float/int
+            try:
+                values.append(float(v))
+            except Exception:
+                values.append(None)
+
+    return {
+        "ok": True,
+        "variable": var,
+        "mode": "single_day" if doy is not None else "range",
+        "doy": int(doy) if doy is not None else None,
+        "doy_start": int(doy_start) if doy_start is not None else None,
+        "doy_end": int(doy_end) if doy_end is not None else None,
+        "aggregation": agg,
+        "years": years,
+        "values": values,
+        "years_used": len(years),
+        "generated_on": datetime.now(timezone.utc).isoformat()
+    }

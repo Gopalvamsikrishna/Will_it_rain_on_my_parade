@@ -123,7 +123,7 @@ def main():
     args = parser.parse_args()
 
     # Corrected parameter names (WS10M instead of WS_10M)
-    params = ["T2M_MAX", "T2M_MIN", "T2M", "PRECTOT", "WS10M"]
+    params = ["T2M_MAX", "T2M_MIN", "T2M", "PRECTOTCORR", "WS10M"]
 
     # If the full range is large, break into chunks and combine results
     dfs = []
