@@ -4,6 +4,9 @@ env/
 __pycache__/
 *.pyc
 
+
+venv/*
+
 # Data files
 data_pipeline/*.csv
 data_pipeline/*.nc
