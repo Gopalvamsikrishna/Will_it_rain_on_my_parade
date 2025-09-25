@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pandas
+xarray
+netCDF4
+requests
+geopandas
+shapely
+rasterio
+pyproj
+plotly
+python-dotenv
+scipy
+statsmodels
+

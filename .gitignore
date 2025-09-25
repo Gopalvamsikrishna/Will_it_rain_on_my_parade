@@ -1,0 +1,21 @@
+# Virtual env
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Data files
+data_pipeline/*.csv
+data_pipeline/*.nc
+data_pipeline/cache/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Secrets
+.env
+
