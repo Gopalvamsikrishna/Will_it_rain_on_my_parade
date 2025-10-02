@@ -5,14 +5,18 @@ from typing import Optional
 import math
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from scipy.stats import linregress
 from functools import lru_cache
+import time
+import requests
+import os
+import tempfile
 
 # Allow the frontend origin(s) used during development:
 origins = [
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
     # add any other local dev URLs you might use
 ]
 
@@ -26,24 +30,199 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Path to cleaned CSV (adjust if you used a different path)
-CLEAN_CSV = "data_pipeline/cache/sample_point_daily_clean.csv"
-
 # -------------------------
-# Utility: load CSV once (cached)
+# NASA POWER data fetching functions
 # -------------------------
-@lru_cache(maxsize=1)
-def load_clean_csv(path: str = CLEAN_CSV) -> pd.DataFrame:
-    try:
-        df = pd.read_csv(path, comment="#", parse_dates=["date"])
-        # ensure expected derived columns exist (if not, compute)
-        if "day_of_year" not in df.columns:
-            df["day_of_year"] = pd.to_datetime(df["date"]).dt.dayofyear
-            df["year"] = pd.to_datetime(df["date"]).dt.year
+POWER_BASE = "https://power.larc.nasa.gov/api/temporal/daily/point"
+CACHE_DIR = os.path.join(tempfile.gettempdir(), "will_it_rain_cache")
+
+def fetch_power(lat, lon, start, end, params, community="AG", fmt="JSON", retries=3, backoff=2):
+    q = {
+        "latitude": lat,
+        "longitude": lon,
+        "start": start,
+        "end": end,
+        "parameters": ",".join(params),
+        "community": community,
+        "format": fmt,
+    }
+
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(POWER_BASE, params=q, timeout=60)
+            if r.status_code != 200:
+                print(f"ERROR: Request failed (status {r.status_code}) for {r.url}")
+                print("Response body:", r.text)
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.HTTPError as e:
+            last_exc = e
+            status = getattr(e.response, "status_code", None)
+            if status and 400 <= status < 500:
+                print(f"HTTP Error {status} (no retry): {e}")
+                print("Response body:", e.response.text if e.response is not None else "(no body)")
+                raise
+            print(f"HTTP error on attempt {attempt}/{retries}: {e}. Retrying in {backoff} seconds...")
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            print(f"Request exception on attempt {attempt}/{retries}: {e}. Retrying in {backoff} seconds...")
+        time.sleep(backoff)
+        backoff *= 2
+
+    raise last_exc if last_exc is not None else RuntimeError("Unknown error fetching POWER data")
+
+def json_to_dataframe(j, params):
+    param_block = j.get("properties", {}).get("parameter", {})
+    if not param_block:
+        raise ValueError("No parameter block found in JSON response.")
+
+    first = next(iter(param_block.values()))
+    dates = sorted(first.keys())
+
+    rows = []
+    for d in dates:
+        row = {"date": datetime.strptime(d, "%Y%m%d").date()}
+        for p in params:
+            val = param_block.get(p, {}).get(d, None)
+            if val is None:
+                row[p] = float("nan")
+            else:
+                try:
+                    row[p] = float(val)
+                except Exception:
+                    row[p] = float("nan")
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df.set_index("date", inplace=True)
+    return df
+
+def chunk_date_ranges(start_str, end_str, days=365):
+    start = datetime.strptime(start_str, "%Y%m%d").date()
+    end = datetime.strptime(end_str, "%Y%m%d").date()
+    cur_start = start
+    while cur_start <= end:
+        cur_end = min(end, cur_start + timedelta(days=days - 1))
+        yield cur_start.strftime("%Y%m%d"), cur_end.strftime("%Y%m%d")
+        cur_start = cur_end + timedelta(days=1)
+
+def get_power_data(lat: float, lon: float, start_year: int = 1990, end_year: int = 2023) -> pd.DataFrame:
+    cache_filename = f"power_{lat:.4f}_{lon:.4f}_{start_year}_{end_year}.csv"
+    cache_filepath = os.path.join(CACHE_DIR, cache_filename)
+
+    if os.path.exists(cache_filepath):
+        print(f"Loading from cache: {cache_filepath}")
+        df = pd.read_csv(cache_filepath, parse_dates=["date"])
         return df
-    except Exception as e:
-        raise RuntimeError(f"Cannot load cleaned CSV '{path}': {e}")
+
+    print(f"Cache miss for {cache_filepath}. Fetching from NASA POWER API...")
+    params = ["T2M_MAX", "T2M_MIN", "T2M", "PRECTOTCORR", "WS10M", "RH2M"]
+    start_str = f"{start_year}0101"
+    end_str = f"{end_year}1231"
+    
+    dfs = []
+    for s_chunk, e_chunk in chunk_date_ranges(start_str, end_str, days=365*5):
+        print(f"Fetching {s_chunk} -> {e_chunk} ...")
+        try:
+            j = fetch_power(lat, lon, s_chunk, e_chunk, params, community="AG")
+            df_chunk = json_to_dataframe(j, params)
+            dfs.append(df_chunk)
+        except Exception as e:
+            print(f"Failed to fetch chunk: {s_chunk} -> {e_chunk}. Error: {e}")
+            continue
+
+    if not dfs:
+        raise HTTPException(status_code=503, detail="Could not fetch any data from NASA POWER API.")
+
+    df = pd.concat(dfs)
+    df = df[~df.index.duplicated(keep="first")]
+    df.sort_index(inplace=True)
+    
+    df.reset_index(inplace=True)
+    df["day_of_year"] = df["date"].dt.dayofyear
+    df["year"] = df["date"].dt.year
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    df.to_csv(cache_filepath, index=False)
+    print(f"Saved to cache: {cache_filepath}")
+
+    return df
+
+# -------------------------
+# Heat Index Calculation
+# -------------------------
+def calculate_heat_index(t, rh):
+    # Using the Steadman formula for heat index in Celsius
+    # t in Celsius, rh in %
+    if t is None or rh is None or pd.isna(t) or pd.isna(rh):
+        return None
+    t_f = t * 9/5 + 32 # Convert to Fahrenheit
+    hi_f = 0.5 * (t_f + 61.0 + ((t_f - 68.0) * 1.2) + (rh * 0.094))
+    if hi_f < 80:
+        return t # Return original temp if HI is low
+    hi_c = (hi_f - 32) * 5/9 # Convert back to Celsius
+    return hi_c
+
+# -------------------------
+# /percentiles endpoint
+# -------------------------
+@app.get("/percentiles")
+def percentiles_api(
+    lat: float = Query(..., description="Latitude"),
+    lon: float = Query(..., description="Longitude"),
+    var: str = Query(..., description="variable name, e.g., t2m_max"),
+    doy: int = Query(..., description="Day of year to calculate percentiles for")
+):
+    df = get_power_data(lat, lon)
+    var_upper = var.upper()
+    if var == "heat_index":
+        df["heat_index"] = df.apply(lambda row: calculate_heat_index(row["T2M"], row["RH2M"]), axis=1)
+        var_upper = "heat_index"
+    
+    if var_upper not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found in dataset for this location.")
+
+    day_data = df[df["day_of_year"] == doy][var_upper].dropna()
+
+    if len(day_data) < 10:
+        raise HTTPException(status_code=400, detail="Not enough data to calculate percentiles for this day.")
+
+    percentiles = {
+        "p10": day_data.quantile(0.10),
+        "p25": day_data.quantile(0.25),
+        "p50": day_data.quantile(0.50),
+        "p75": day_data.quantile(0.75),
+        "p90": day_data.quantile(0.90),
+    }
+    return sanitize_for_json(percentiles)
+
+# -------------------------
+# /discomfort_index endpoint
+# -------------------------
+@app.get("/discomfort_index")
+def discomfort_index_api(
+    lat: float = Query(..., description="Latitude"),
+    lon: float = Query(..., description="Longitude"),
+    doy: int = Query(..., description="Day of year to calculate discomfort index for")
+):
+    df = get_power_data(lat, lon)
+    df["heat_index"] = df.apply(lambda row: calculate_heat_index(row["T2M"], row["RH2M"]), axis=1)
+    
+    yearly = extract_yearly_values(df, var="heat_index", doy=doy)
+    years = [int(y) for y in yearly.index.tolist()]
+    values = [v for v in yearly.values]
+
+    return {
+        "ok": True,
+        "variable": "heat_index",
+        "doy": doy,
+        "years": years,
+        "values": values,
+        "years_used": len(years),
+        "generated_on": datetime.now(timezone.utc).isoformat()
+    }
 
 # -------------------------
 # Extraction helpers
@@ -53,17 +232,22 @@ def extract_yearly_values(df: pd.DataFrame, var: str,
                           doy_start: Optional[int]=None,
                           doy_end: Optional[int]=None,
                           agg: str="mean"):
+    var_upper = var.upper()
+    if var == "heat_index":
+        df["heat_index"] = df.apply(lambda row: calculate_heat_index(row["T2M"], row["RH2M"]), axis=1)
+        var_upper = "heat_index"
+
     if doy is not None:
         sel = df[df["day_of_year"] == int(doy)]
-        yearly = sel.groupby("year")[var].first().dropna()
+        yearly = sel.groupby("year")[var_upper].first().dropna()
     else:
         sel = df[(df["day_of_year"] >= int(doy_start)) & (df["day_of_year"] <= int(doy_end))]
         if agg == "mean":
-            yearly = sel.groupby("year")[var].mean().dropna()
+            yearly = sel.groupby("year")[var_upper].mean().dropna()
         elif agg == "sum":
-            yearly = sel.groupby("year")[var].sum().dropna()
+            yearly = sel.groupby("year")[var_upper].sum().dropna()
         elif agg == "max":
-            yearly = sel.groupby("year")[var].max().dropna()
+            yearly = sel.groupby("year")[var_upper].max().dropna()
         else:
             raise ValueError("Unsupported agg")
     return yearly.sort_index()
@@ -187,6 +371,8 @@ def sanitize_for_json(obj):
 # -------------------------
 @app.get("/probability")
 def probability_api(
+    lat: float = Query(..., description="Latitude"),
+    lon: float = Query(..., description="Longitude"),
     var: str = Query(..., description="variable name, e.g., t2m_max"),
     threshold: float = Query(...),
     doy: Optional[int] = Query(None, ge=1, le=366),
@@ -196,9 +382,14 @@ def probability_api(
     n_boot: int = Query(1000, ge=0),
     min_years: int = Query(5, ge=1)
 ):
-    df = load_clean_csv()
-    if var not in df.columns:
-        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found in cleaned CSV.")
+    df = get_power_data(lat, lon)
+    var_upper = var.upper()
+    if var == "heat_index":
+        df["heat_index"] = df.apply(lambda row: calculate_heat_index(row["T2M"], row["RH2M"]), axis=1)
+        var_upper = "heat_index"
+
+    if var_upper not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found in dataset for this location.")
 
     if doy is None and (doy_start is None or doy_end is None):
         raise HTTPException(status_code=400, detail="Either 'doy' or both 'doy_start' and 'doy_end' required.")
@@ -240,6 +431,8 @@ def probability_api(
 # -------------------------
 @app.get("/trend")
 def trend_api(
+    lat: float = Query(..., description="Latitude"),
+    lon: float = Query(..., description="Longitude"),
     var: str = Query(..., description="variable name, e.g., t2m_max"),
     doy: Optional[int] = Query(None, ge=1, le=366),
     doy_start: Optional[int] = Query(None, ge=1, le=366),
@@ -249,9 +442,14 @@ def trend_api(
     decade_span: int = Query(10, ge=1),
     min_years: int = Query(10, ge=1)
 ):
-    df = load_clean_csv()
-    if var not in df.columns:
-        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found in cleaned CSV.")
+    df = get_power_data(lat, lon)
+    var_upper = var.upper()
+    if var == "heat_index":
+        df["heat_index"] = df.apply(lambda row: calculate_heat_index(row["T2M"], row["RH2M"]), axis=1)
+        var_upper = "heat_index"
+
+    if var_upper not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found in dataset for this location.")
 
     if doy is None and (doy_start is None or doy_end is None):
         raise HTTPException(status_code=400, detail="Either 'doy' or both 'doy_start' and 'doy_end' required.")
@@ -293,15 +491,22 @@ def trend_api(
 
 @app.get("/history")
 def history_api(
+    lat: float = Query(..., description="Latitude"),
+    lon: float = Query(..., description="Longitude"),
     var: str = Query(..., description="variable name e.g. t2m_max"),
     doy: Optional[int] = Query(None, ge=1, le=366),
     doy_start: Optional[int] = Query(None, ge=1, le=366),
     doy_end: Optional[int] = Query(None, ge=1, le=366),
     agg: str = Query("mean", regex="^(mean|sum|max)$")
 ):
-    df = load_clean_csv()
-    if var not in df.columns:
-        raise HTTPException(status_code=400, detail=f"Variable '{var}' not in cleaned CSV")
+    df = get_power_data(lat, lon)
+    var_upper = var.upper()
+    if var == "heat_index":
+        df["heat_index"] = df.apply(lambda row: calculate_heat_index(row["T2M"], row["RH2M"]), axis=1)
+        var_upper = "heat_index"
+
+    if var_upper not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Variable '{var}' not found in dataset for this location.")
     if doy is None and (doy_start is None or doy_end is None):
         raise HTTPException(status_code=400, detail="Either 'doy' OR both 'doy_start' and 'doy_end' required")
 

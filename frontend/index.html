@@ -2,243 +2,359 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Will It Rain — Demo UI</title>
+  <title>Will It Rain On My Parade? - NASA Space Apps 2025</title>
   <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-geosearch@3.6.1/dist/geosearch.css" />
   <style>
-    body { font-family: Arial, Helvetica, sans-serif; max-width:1100px; margin:18px auto; padding:0 18px; }
-    label { display:inline-block; width:120px; font-weight:600; }
-    .row { margin:6px 0; }
-    .controls { background:#f7f7f7; padding:12px; border-radius:6px; margin-bottom:12px;}
-    #outputJson { white-space:pre-wrap; background:#111; color:#dff; padding:10px; border-radius:6px; max-height:240px; overflow:auto; }
-    #charts { display:flex; gap:16px; flex-wrap:wrap; margin-top:12px; }
-    .chart { flex:1 1 48%; min-width:320px; height:360px; }
-    button { padding:8px 12px; margin-left:6px; }
+    body { 
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        margin: 0;
+        display: flex;
+        height: 100vh;
+        overflow: hidden;
+    }
+    .sidebar {
+        width: 400px;
+        padding: 20px;
+        background: #f8f9fa;
+        overflow-y: auto;
+        border-right: 1px solid #dee2e6;
+    }
+    .main-content {
+        flex: 1;
+        padding: 20px;
+        overflow-y: auto;
+    }
+    h1, h2, h3 { color: #343a40; }
+    .row { margin-bottom: 15px; }
+    label { 
+        display: block;
+        margin-bottom: 5px;
+        font-weight: 600;
+        color: #495057;
+    }
+    select, input[type='number'] {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+    }
+    button {
+        width: 100%;
+        padding: 10px;
+        border: none;
+        border-radius: 4px;
+        background-color: #007bff;
+        color: white;
+        font-size: 16px;
+        cursor: pointer;
+    }
+    button:hover { background-color: #0056b3; }
+    #map { 
+        height: 300px; 
+        border-radius: 4px;
+        margin-bottom: 15px;
+    }
+    #summary, #outputJson {
+        background: #e9ecef;
+        padding: 15px;
+        border-radius: 4px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+    .chart-container {
+        display: flex;
+        gap: 20px;
+        margin-top: 20px;
+    }
+    .chart { 
+        flex: 1 1 48%;
+        height: 360px; 
+    }
   </style>
 </head>
 <body>
-  <h1>Will It Rain — Demo UI</h1>
-
-  <div class="controls">
+  <div class="sidebar">
+    <h1>Will It Rain?</h1>
+    <p>Select a location and query historical weather data to plan your outdoor activities.</p>
+    
+    <div id="map"></div>
     <div class="row">
-      <label>Variable</label>
-      <select id="varSelect">
-        <option value="t2m_max">t2m_max (max temp °C)</option>
-        <option value="t2m_min">t2m_min (min temp °C)</option>
-        <option value="t2m">t2m (mean temp °C)</option>
-        <option value="prectot">prectot (precip mm/day)</option>
-        <option value="ws10m">ws10m (wind m/s)</option>
-      </select>
+      <label>Selected Location (Lat, Lon)</label>
+      <span id="location-coords">12.97, 77.59</span>
     </div>
 
-    <div class="row">
-      <label>Mode</label>
-      <input type="radio" name="mode" id="modeDay" value="day" checked> <label for="modeDay" style="width:auto">Single day</label>
-      <input type="radio" name="mode" id="modeRange" value="range"> <label for="modeRange" style="width:auto">Day range</label>
-    </div>
+    <div class="controls">
+      <div class="row">
+        <label for="varSelect">Weather Condition</label>
+        <select id="varSelect">
+          <option value="t2m_max">Very Hot Day</option>
+          <option value="t2m_min">Very Cold Day</option>
+          <option value="prectotcorr">Very Wet Day</option>
+          <option value="ws10m">Very Windy Day</option>
+          <option value="heat_index">Very Uncomfortable Day</option>
+        </select>
+      </div>
 
-    <div class="row" id="dayRow">
-      <label>Day of year</label>
-      <input id="doy" type="number" min="1" max="366" value="196" style="width:120px">
-    </div>
+      <div class="row">
+        <label>Date</label>
+        <input type="radio" name="mode" id="modeDay" value="day" checked> <label for="modeDay" style="display:inline-block; width:auto;">Single Day</label>
+        <input type="radio" name="mode" id="modeRange" value="range"> <label for="modeRange" style="display:inline-block; width:auto;">Date Range</label>
+      </div>
 
-    <div class="row" id="rangeRow" style="display:none">
-      <label>Range (doy)</label>
-      <input id="doyStart" type="number" min="1" max="366" value="152" style="width:80px"> -
-      <input id="doyEnd" type="number" min="1" max="366" value="244" style="width:80px">
-      <label style="width:120px;margin-left:8px">Agg</label>
-      <select id="agg">
-        <option value="sum">sum</option>
-        <option value="mean">mean</option>
-        <option value="max">max</option>
-      </select>
-    </div>
+      <div class="row" id="dayRow">
+        <label for="doy">Day of Year</label>
+        <input id="doy" type="number" min="1" max="366" value="196">
+      </div>
 
-    <div class="row">
-      <label>Threshold</label>
-      <input id="threshold" type="number" step="0.1" value="30" style="width:120px">
+      <div class="row" id="rangeRow" style="display:none">
+        <label>Day of Year Range</label>
+        <input id="doyStart" type="number" min="1" max="366" value="152" style="width: 48%; display: inline-block;"> - 
+        <input id="doyEnd" type="number" min="1" max="366" value="244" style="width: 48%; display: inline-block;">
+        <label for="agg" style="margin-top: 10px;">Aggregation</label>
+        <select id="agg">
+          <option value="mean">Mean</option>
+          <option value="sum">Sum</option>
+          <option value="max">Max</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label for="threshold">Threshold</label>
+        <input id="threshold" type="number" step="0.1" value="30">
+      </div>
+
       <button id="runBtn">Get Probability & Trend</button>
-      <button id="exampleBtn">Example: lower threshold</button>
-    </div>
-
-    <div style="margin-top:8px;">
-      <small>Server URL: <code id="serverUrl">http://127.0.0.1:8000</code></small>
     </div>
   </div>
 
-  <div style="display:flex; gap:12px;">
-    <div style="flex:1">
-      <h3>API Response</h3>
-      <div id="outputJson">(results will appear here)</div>
+  <div class="main-content">
+    <h2>Results</h2>
+    <div id="summary">Select a location and click "Get Probability & Trend" to see results.</div>
+    
+    <div class="chart-container">
+        <div id="annualChart" class="chart"></div>
+        <div id="decadalChart" class="chart"></div>
     </div>
-    <div style="width:320px">
-      <h3>Quick summary</h3>
-      <div id="summary">No query yet.</div>
+
+    <h3>Raw API Response</h3>
+    <div id="outputJson">(Raw JSON response will appear here)</div>
+    <div style="margin-top:15px;">
+        <button id="downloadBtn" style="width: auto; padding: 10px 15px;">Download Data (JSON)</button>
     </div>
   </div>
 
-  <div id="charts">
-    <div id="annualChart" class="chart"></div>
-    <div id="decadalChart" class="chart"></div>
-  </div>
-
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet-geosearch@3.6.1/dist/geosearch.umd.js"></script>
 <script>
-/* ---------------------
-   Helper plotting funcs
+/* --------------------- 
+   Map Initialization
+   --------------------- */
+const map = L.map('map').setView([12.97, 77.59], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap'
+}).addTo(map);
+let marker = L.marker([12.97, 77.59], {draggable: true}).addTo(map);
+
+const search = new GeoSearch.GeoSearchControl({
+  provider: new GeoSearch.OpenStreetMapProvider(),
+  style: 'bar',
+  showMarker: false,
+});
+map.addControl(search);
+
+map.on('geosearch/showlocation', function(result) {
+    marker.setLatLng(result.location);
+    updateCoords();
+});
+
+marker.on('dragend', function(event){
+    updateCoords();
+});
+
+function updateCoords(){
+    var position = marker.getLatLng();
+    document.getElementById('location-coords').innerText = `${position.lat.toFixed(2)}, ${position.lng.toFixed(2)}`;
+}
+
+/* --------------------- 
+   UI Logic
+   --------------------- */
+document.getElementById('modeDay').addEventListener('change', toggleMode);
+document.getElementById('modeRange').addEventListener('change', toggleMode);
+const varSelect = document.getElementById('varSelect');
+const doyInput = document.getElementById('doy');
+varSelect.addEventListener('change', updateThresholds);
+doyInput.addEventListener('change', updateThresholds);
+
+function toggleMode(){
+  const isRange = document.getElementById('modeRange').checked;
+  document.getElementById('dayRow').style.display = isRange ? 'none' : 'block';
+  document.getElementById('rangeRow').style.display = isRange ? 'block' : 'none';
+  updateThresholds();
+}
+
+async function updateThresholds() {
+    const v = varSelect.value;
+    const doy = parseInt(doyInput.value);
+    const location = marker.getLatLng();
+    const lat = location.lat;
+    const lon = location.lng;
+    const server = "http://127.0.0.1:8000";
+
+    const url = `${server}/percentiles?lat=${lat}&lon=${lon}&var=${v}&doy=${doy}`;
+    try {
+        const resp = await fetch(url).then(r => r.json());
+        let threshold = 30;
+        if (v === 't2m_max') threshold = resp.p90;
+        if (v === 't2m_min') threshold = resp.p10;
+        if (v === 'prectotcorr') threshold = resp.p90;
+        if (v === 'ws10m') threshold = resp.p90;
+        if (v === 'heat_index') threshold = resp.p90;
+        document.getElementById('threshold').value = threshold.toFixed(1);
+    } catch (err) {
+        console.error("Could not fetch percentiles:", err);
+    }
+}
+
+/* --------------------- 
+   Main Query Logic
+   --------------------- */
+const runBtn = document.getElementById('runBtn');
+runBtn.onclick = runQuery;
+
+let apiData = {}; // To store the latest API response for download
+
+async function runQuery(){
+  document.getElementById('summary').innerText = "(updating threshold...)";
+  await updateThresholds();
+  const v = document.getElementById('varSelect').value;
+  const isRange = document.getElementById('modeRange').checked;
+  const threshold = parseFloat(document.getElementById('threshold').value);
+  const agg = document.getElementById('agg').value;
+  const location = marker.getLatLng();
+  const lat = location.lat;
+  const lon = location.lng;
+  const server = "http://127.0.0.1:8000";
+
+  let probUrl="", trendUrl="", histUrl="";
+  if (isRange) {
+    const ds = parseInt(document.getElementById('doyStart').value);
+    const de = parseInt(document.getElementById('doyEnd').value);
+    probUrl  = `${server}/probability?lat=${lat}&lon=${lon}&var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}&threshold=${encodeURIComponent(threshold)}&n_boot=500`;
+    trendUrl = `${server}/trend?lat=${lat}&lon=${lon}&var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}&threshold=${encodeURIComponent(threshold)}&decade_span=10`;
+    histUrl  = `${server}/history?lat=${lat}&lon=${lon}&var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}`;
+  } else {
+    const doy = parseInt(document.getElementById('doy').value);
+    if (v === 'heat_index') {
+        histUrl = `${server}/discomfort_index?lat=${lat}&lon=${lon}&doy=${doy}`;
+        probUrl  = `${server}/probability?lat=${lat}&lon=${lon}&var=heat_index&doy=${doy}&threshold=${encodeURIComponent(threshold)}&n_boot=500`;
+        trendUrl = `${server}/trend?lat=${lat}&lon=${lon}&var=heat_index&doy=${doy}&threshold=${encodeURIComponent(threshold)}&decade_span=10`;
+    } else {
+        probUrl  = `${server}/probability?lat=${lat}&lon=${lon}&var=${encodeURIComponent(v)}&doy=${doy}&threshold=${encodeURIComponent(threshold)}&n_boot=500`;
+        trendUrl = `${server}/trend?lat=${lat}&lon=${lon}&var=${encodeURIComponent(v)}&doy=${doy}&threshold=${encodeURIComponent(threshold)}&decade_span=10`;
+        histUrl  = `${server}/history?lat=${lat}&lon=${lon}&var=${encodeURIComponent(v)}&doy=${doy}`;
+    }
+  }
+
+  document.getElementById('summary').innerText = "(fetching...)";
+  try {
+    const results = await Promise.allSettled([
+      fetch(probUrl).then(r => r.json()),
+      fetch(trendUrl).then(r => r.json()),
+      fetch(histUrl).then(r => r.json())
+    ]);
+
+    const probRespRaw = results[0].status === 'fulfilled' ? results[0].value : { ok: false, error: results[0].reason };
+    const trendRespRaw = results[1].status === 'fulfilled' ? results[1].value : { ok: false, error: results[1].reason };
+    const histRespRaw = results[2].status === 'fulfilled' ? results[2].value : { ok: false, error: results[2].reason };
+
+    apiData = { probability: probRespRaw, trend: trendRespRaw, history: histRespRaw };
+
+    document.getElementById('outputJson').innerText = JSON.stringify(apiData, null, 2);
+    renderSummary(probRespRaw, trendRespRaw);
+    drawAnnualScatterAndFit('annualChart', histRespRaw.years || [], histRespRaw.values || []);
+    plotDecadalFromTrendResp(trendRespRaw, v, threshold);
+
+  } catch (err) {
+    console.error("API fetch error:", err);
+    document.getElementById('summary').innerText = "Error contacting API: " + (err.message || err);
+  }
+}
+
+/* --------------------- 
+   Plotting & Summary
    --------------------- */
 
+function renderSummary(prob, trend){
+  if(!prob || !prob.ok) {
+    document.getElementById('summary').innerText = "Probability not available: " + JSON.stringify(prob);
+    return;
+  }
+  const p = Math.round((prob.probability||0)*1000)/10;
+  const years = prob.years_used;
+  const exceed = prob.exceed_count;
+  let s = `Probability of exceeding threshold: ${p}% (based on ${years} years, ${exceed} occurrences)\n`;
+  if(trend && trend.value_trend){
+    const slope = trend.value_trend.slope_per_year;
+    const slope_dec = (slope*10).toFixed(3);
+    s += `Value trend: ${slope?.toFixed(4) ?? 'n/a'} units/year (~${slope_dec} per decade). p-value=${trend.value_trend.p_value?.toFixed(3) ?? 'null'}`;
+  }
+  document.getElementById('summary').innerText = s;
+}
+
 function drawAnnualScatterAndFit(targetId, years, values) {
-  // Filter valid numeric points
-  const pts = years.map((y,i) => ({x: y, y: values[i]}))
-                   .filter(p => p.y !== null && p.y !== undefined && !isNaN(p.y));
+  const pts = (years || []).map((y,i) => ({x: y, y: values[i]}))
+                         .filter(p => p.y !== null && p.y !== undefined && !isNaN(p.y));
   const xs = pts.map(p => p.x);
   const ys = pts.map(p => p.y);
-
-  const scatter = { x: xs, y: ys, mode: 'markers', name: 'Annual values', marker: { size:6 } };
+  const scatter = { x: xs, y: ys, mode: 'markers', name: 'Annual values' };
 
   if (xs.length >= 2) {
-    // simple least-squares slope/intercept
     const n = xs.length;
-    let sumX=0,sumY=0,sumXY=0,sumXX=0;
-    for(let i=0;i<n;i++){
-      sumX += xs[i]; sumY += ys[i];
-      sumXY += xs[i]*ys[i]; sumXX += xs[i]*xs[i];
-    }
+    let sumX=0, sumY=0, sumXY=0, sumXX=0;
+    for(let i=0; i<n; i++) { sumX += xs[i]; sumY += ys[i]; sumXY += xs[i]*ys[i]; sumXX += xs[i]*xs[i]; }
     const meanX = sumX/n, meanY = sumY/n;
     const slope = (sumXY - n*meanX*meanY) / (sumXX - n*meanX*meanX);
     const intercept = meanY - slope*meanX;
     const fitX = [Math.min(...xs), Math.max(...xs)];
     const fitY = fitX.map(x => slope*x + intercept);
-    const fit = { x: fitX, y: fitY, mode: 'lines', name: `Linear fit (slope=${(slope||0).toFixed(4)})` };
-    Plotly.newPlot(targetId, [scatter, fit], { title: 'Annual values + linear fit', margin:{t:36} });
+    const fit = { x: fitX, y: fitY, mode: 'lines', name: `Linear Fit (slope=${(slope||0).toFixed(4)})` };
+    Plotly.newPlot(targetId, [scatter, fit], { title: 'Annual Values + Linear Fit', margin:{t:36} });
   } else {
-    Plotly.newPlot(targetId, [scatter], { title: 'Annual values', margin:{t:36} });
+    Plotly.newPlot(targetId, [scatter], { title: 'Annual Values', margin:{t:36} });
   }
 }
 
 function plotDecadalFromTrendResp(trendResp, varName, threshold) {
   const dec = (trendResp && trendResp.decadal_summary) ? trendResp.decadal_summary : [];
   if (!dec.length) {
-    Plotly.newPlot('decadalChart', [], { title: 'Decadal summary (no data)', margin:{t:36} });
+    Plotly.newPlot('decadalChart', [], { title: 'Decadal Summary (no data)', margin:{t:36} });
     return;
   }
   const decades = dec.map(d => `${d.decade_start}-${d.decade_end}`);
-  // detect which key exists
   const isProb = dec[0].hasOwnProperty('prob_exceed');
   const vals = dec.map(d => isProb ? d.prob_exceed : d.mean_value);
-  const trace = { x: decades, y: vals, type: 'bar', name: isProb ? 'Probability' : 'Mean value', hovertemplate: '%{x}<br>%{y}<extra></extra>' };
-  const title = isProb ? `Decadal probability of exceeding threshold (${threshold})` : `Decadal mean ${varName}`;
+  const trace = { x: decades, y: vals, type: 'bar' };
+  const title = isProb ? `Decadal Probability > ${threshold}` : `Decadal Mean ${varName}`;
   Plotly.newPlot('decadalChart', [trace], { title, margin:{t:36} });
 }
 
-/* ---------------------
-   Utility + UI helpers
+/* --------------------- 
+   Data Download
    --------------------- */
-
-function setStatus(text) {
-  document.getElementById('summary').innerText = text;
-}
-function safeJsonText(obj) {
-  try { return JSON.stringify(obj, null, 2); } catch(e) { return String(obj); }
-}
-
-/* ---------------------
-   Main runQuery()
-   --------------------- */
-
-const server = document.getElementById('serverUrl').innerText.replace(/\/+$/,'');
-const runBtn = document.getElementById('runBtn');
-const exampleBtn = document.getElementById('exampleBtn');
-
-document.getElementById('modeDay').addEventListener('change', toggleMode);
-document.getElementById('modeRange').addEventListener('change', toggleMode);
-function toggleMode(){
-  const isRange = document.getElementById('modeRange').checked;
-  document.getElementById('dayRow').style.display = isRange ? 'none' : 'block';
-  document.getElementById('rangeRow').style.display = isRange ? 'block' : 'none';
+document.getElementById('downloadBtn').onclick = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(apiData, null, 2));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href",     dataStr);
+    downloadAnchorNode.setAttribute("download", "weather_data.json");
+    document.body.appendChild(downloadAnchorNode); // required for firefox
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
 }
 
-exampleBtn.onclick = () => {
-  document.getElementById('threshold').value = 30;
-  runQuery();
-};
-runBtn.onclick = runQuery;
-
-async function runQuery(){
-  const v = document.getElementById('varSelect').value;
-  const isRange = document.getElementById('modeRange').checked;
-  const threshold = parseFloat(document.getElementById('threshold').value);
-  const agg = document.getElementById('agg').value;
-
-  let probUrl="", trendUrl="", histUrl="";
-  if (isRange) {
-    const ds = parseInt(document.getElementById('doyStart').value);
-    const de = parseInt(document.getElementById('doyEnd').value);
-    probUrl  = `${server}/probability?var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}&threshold=${encodeURIComponent(threshold)}&n_boot=500`;
-    trendUrl = `${server}/trend?var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}&threshold=${encodeURIComponent(threshold)}&decade_span=10`;
-    histUrl  = `${server}/history?var=${encodeURIComponent(v)}&doy_start=${ds}&doy_end=${de}&agg=${encodeURIComponent(agg)}`;
-  } else {
-    const doy = parseInt(document.getElementById('doy').value);
-    probUrl  = `${server}/probability?var=${encodeURIComponent(v)}&doy=${doy}&threshold=${encodeURIComponent(threshold)}&n_boot=500`;
-    trendUrl = `${server}/trend?var=${encodeURIComponent(v)}&doy=${doy}&threshold=${encodeURIComponent(threshold)}&decade_span=10`;
-    histUrl  = `${server}/history?var=${encodeURIComponent(v)}&doy=${doy}`;
-  }
-
-  // Debug: show URLs
-  console.log("probUrl =", probUrl);
-  console.log("trendUrl =", trendUrl);
-  console.log("histUrl =", histUrl);
-
-  setStatus("(fetching...)");
-  try {
-    const [probRespRaw, trendRespRaw, histRespRaw] = await Promise.all([
-      fetch(probUrl).then(async r => ({ ok: r.ok, status: r.status, json: await safeJson(r) })),
-      fetch(trendUrl).then(async r => ({ ok: r.ok, status: r.status, json: await safeJson(r) })),
-      fetch(histUrl).then(async r => ({ ok: r.ok, status: r.status, json: await safeJson(r) }))
-    ]);
-
-    // If any request failed (non-2xx), show error details
-    for (const res of [probRespRaw, trendRespRaw, histRespRaw]) {
-      if (!res.ok) {
-        throw new Error(`Request failed (status ${res.status}): ${JSON.stringify(res.json)}`);
-      }
-    }
-
-    const probResp = probRespRaw.json;
-    const trendResp = trendRespRaw.json;
-    const histResp = histRespRaw.json;
-
-    document.getElementById('outputJson').innerText = safeJsonText({ probability: probResp, trend: trendResp, history: histResp });
-    renderSummary(probResp, trendResp);
-    // plot history & decadal
-    drawAnnualScatterAndFit('annualChart', histResp.years || [], histResp.values || []);
-    plotDecadalFromTrendResp(trendResp, v, threshold);
-  } catch (err) {
-    console.error("API fetch error:", err);
-    setStatus("Error contacting API: " + (err.message || err));
-  }
-}
-
-/* safeJson helper: try to parse body text as JSON, otherwise return raw text */
-async function safeJson(resp) {
-  try { return await resp.json(); } catch (e) { return await resp.text(); }
-}
-
-function renderSummary(prob, trend){
-  if(!prob || !prob.ok) {
-    setStatus("Probability not available: " + safeJsonText(prob));
-    return;
-  }
-  const p = Math.round((prob.probability||0)*1000)/10;
-  const years = prob.years_used;
-  const exceed = prob.exceed_count;
-  let s = `Probability of exceeding threshold: ${p}% (based on ${years} years, exceed_count=${exceed})\n`;
-  if(trend && trend.value_trend){
-    const slope = trend.value_trend.slope_per_year;
-    const slope_dec = (slope*10).toFixed(3);
-    s += `Value trend: ${slope?.toFixed(4) ?? 'n/a'} units/year (~${slope_dec} per decade). p=${trend.value_trend.p_value ?? 'null'}\n`;
-  }
-  setStatus(s);
-}
 </script>
 </body>
 </html>
